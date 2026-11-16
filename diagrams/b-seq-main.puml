@@ -1,0 +1,32 @@
+@startuml b-seq-main
+title Вариант B: основной сценарий (push доставлен и подтверждён)
+autonumber
+participant "Сервис платежей" as src
+participant "Ingestion API" as api
+participant "Temporal Server" as t
+participant "Delivery Workflow" as wf
+participant "Push Activity Worker" as pw
+participant "APNs / FCM" as apns
+actor "Приложение клиента" as app
+participant "Callback Gateway" as cb
+
+src -> api : SendCritical(userId, template, data)\nIdempotency-Key = txId:DEBIT
+api -> t : StartWorkflow(id = Idempotency-Key,\nreusePolicy = RejectDuplicate)
+t --> api : started (событие записано в Cassandra)
+api --> src : 202 Accepted
+t -> wf : workflow task
+wf -> wf : local activity: настройки из Redis,\nплан = [push 15 с, sms 90 с, email]
+wf -> t : schedule WriteInbox, SendPush
+t -> pw : activity task (task queue push)
+pw -> apns : push, collapse-id = notificationId
+apns --> pw : 200 OK
+pw --> t : activity completed
+t -> wf : workflow task
+wf -> t : await signal Delivered, timer 15 с
+apns -> app : push
+app -> cb : POST /v1/acks {notificationId}
+cb -> t : SignalWorkflow(id, Delivered(push))
+t -> wf : signal Delivered
+wf -> t : schedule PublishStatus, complete(DELIVERED)
+note over t : история workflow видна в Temporal UI,\nметрики SDK уходят в Prometheus
+@enduml

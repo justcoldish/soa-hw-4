@@ -1,0 +1,52 @@
+@startuml b-c4
+!include <C4/C4_Container>
+title Вариант B: workflow-движок Temporal (C4 Container)
+
+Person(client, "Клиент банка", "Мобильное приложение, телефон, почта")
+System_Ext(sources, "Сервисы-источники", "Платежи, переводы, карты")
+System_Ext(profile, "Сервис профиля", "Контакты, push-токены, настройки уведомлений")
+
+System_Boundary(np, "Notification Platform: подсистема критичных уведомлений") {
+  Container(api, "Ingestion API", "Kotlin, Spring Boot", "Валидация, старт workflow с id = Idempotency-Key, ответ 202")
+  Container(temporal, "Temporal Server", "Temporal 1.2x: frontend, history, matching", "Хранит историю workflow, таймеры, очереди задач")
+  ContainerDb(cass, "Temporal Persistence", "Cassandra 4.1", "История событий workflow")
+  ContainerDb(es, "Temporal Visibility", "Elasticsearch 8", "Поиск workflow по атрибутам")
+  Container(wfw, "Delivery Workflow Worker", "Kotlin, Temporal SDK", "Канальный план, ожидание сигнала, failover")
+  Container(pushw, "Push Activity Worker", "Kotlin, Temporal SDK", "Task queue push")
+  Container(smsw, "SMS Activity Worker", "Kotlin, Temporal SDK", "Task queue sms, rate limit, переключение A/B")
+  Container(emailw, "Email Activity Worker", "Kotlin, Temporal SDK", "Task queue email")
+  Container(cb, "Callback Gateway", "Kotlin", "Ack и DLR превращает в сигналы workflow")
+  ContainerDb(redis, "Redis", "Redis 7", "Кэш настроек, здоровье провайдеров")
+  Container(inbox, "In-app Inbox", "Kotlin, PostgreSQL", "Лента уведомлений в приложении")
+  ContainerQueue(kafka, "Kafka", "Apache Kafka 3.8", "notification.status для аналитики и поддержки")
+  Container(obs, "Observability", "Temporal UI, Prometheus, Grafana, Tempo, ClickHouse", "История каждого workflow, метрики, трейсы")
+}
+
+System_Ext(push, "Push-провайдеры", "APNs, FCM, HMS, RuStore")
+System_Ext(sms, "SMS-агрегаторы A и B", "HTTP API, DLR-вебхуки")
+System_Ext(email, "Email-провайдеры", "SMTP")
+
+Rel(sources, api, "Отправить уведомление", "gRPC")
+Rel(api, temporal, "StartWorkflow", "gRPC")
+Rel_R(temporal, cass, "История, таймеры")
+Rel_R(temporal, es, "Visibility")
+Rel_U(wfw, temporal, "Workflow tasks", "gRPC long poll")
+Rel_U(pushw, temporal, "Activity tasks", "gRPC long poll")
+Rel_U(smsw, temporal, "Activity tasks", "gRPC long poll")
+Rel_U(emailw, temporal, "Activity tasks", "gRPC long poll")
+Rel_D(wfw, redis, "Настройки (local activity)")
+Rel(wfw, profile, "Промах кэша", "gRPC")
+Rel_D(wfw, inbox, "Запись в ленту (activity)")
+Rel_D(wfw, kafka, "Статусы (activity)")
+Rel_D(pushw, push, "Отправка", "HTTP/2")
+Rel_D(smsw, sms, "Отправка", "HTTPS")
+Rel_D(emailw, email, "Отправка", "SMTP")
+Rel(push, client, "Push")
+Rel(sms, client, "SMS")
+Rel(email, client, "Email")
+Rel(client, cb, "Ack доставки push", "HTTPS")
+Rel(sms, cb, "DLR", "Webhook")
+Rel_U(cb, temporal, "SignalWorkflow", "gRPC")
+
+SHOW_LEGEND()
+@enduml

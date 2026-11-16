@@ -1,0 +1,50 @@
+@startuml a-c4
+!include <C4/C4_Container>
+title Вариант A: оркестратор на Kafka + PostgreSQL (C4 Container)
+
+Person(client, "Клиент банка", "Мобильное приложение, телефон, почта")
+System_Ext(sources, "Сервисы-источники", "Платежи, переводы, карты")
+System_Ext(profile, "Сервис профиля", "Контакты, push-токены, настройки уведомлений")
+
+System_Boundary(np, "Notification Platform: подсистема критичных уведомлений") {
+  Container(api, "Ingestion API", "Kotlin, Spring Boot", "Валидация, Idempotency-Key, публикация в Kafka, ответ 202")
+  ContainerQueue(kafka, "Kafka", "Apache Kafka 3.8, RF=3", "critical.requests, send.push, send.sms, send.email, delivery.events")
+  Container(orch, "Delivery Orchestrator", "Kotlin, Spring Boot", "Машина состояний, канальный план, failover. Включает Deadline Scheduler")
+  ContainerDb(pg, "Delivery State DB", "PostgreSQL 16, Patroni", "Уведомления, попытки, дедлайны, ключи дедупликации")
+  ContainerDb(redis, "Redis", "Redis 7, Sentinel", "Кэш настроек, здоровье провайдеров, захват попыток")
+  Container(pushw, "Push Worker", "Kotlin", "APNs, FCM, HMS, RuStore")
+  Container(smsw, "SMS Worker", "Kotlin, Resilience4j", "Circuit breaker, переключение агрегаторов A/B")
+  Container(emailw, "Email Worker", "Kotlin", "SMTP-релей и резервный ESP")
+  Container(cb, "Callback Gateway", "Kotlin", "Ack от приложения, DLR от SMS-агрегаторов")
+  Container(inbox, "In-app Inbox", "Kotlin, PostgreSQL", "Лента уведомлений в приложении")
+  Container(obs, "Observability", "Prometheus, Grafana, Tempo, OpenSearch, ClickHouse", "Метрики, трейсы, логи, аналитика. Получает данные от всех контейнеров")
+}
+
+System_Ext(push, "Push-провайдеры", "APNs, FCM, HMS, RuStore")
+System_Ext(sms, "SMS-агрегаторы A и B", "HTTP API, DLR-вебхуки")
+System_Ext(email, "Email-провайдеры", "SMTP")
+
+Rel(sources, api, "Отправить уведомление", "gRPC")
+Rel(api, kafka, "critical.requests", "acks=all")
+Rel(kafka, orch, "requests, delivery.events")
+Rel(orch, kafka, "send.*, TIMEOUT")
+Rel(orch, pg, "Состояние и дедлайны", "SQL")
+Rel(orch, redis, "Настройки (кэш)")
+Rel(orch, profile, "Промах кэша", "gRPC")
+Rel(orch, inbox, "Запись в ленту", "gRPC")
+Rel(kafka, pushw, "send.push")
+Rel(kafka, smsw, "send.sms")
+Rel(kafka, emailw, "send.email")
+Rel(pushw, push, "Отправка", "HTTP/2")
+Rel(smsw, sms, "Отправка", "HTTPS")
+Rel(emailw, email, "Отправка", "SMTP")
+Rel(push, client, "Push")
+Rel(sms, client, "SMS")
+Rel(email, client, "Email")
+Rel(client, cb, "Ack доставки push", "HTTPS")
+Rel(sms, cb, "DLR", "Webhook")
+Rel(cb, kafka, "delivery.events")
+Rel_U(pushw, kafka, "SENT / FAILED")
+
+SHOW_LEGEND()
+@enduml

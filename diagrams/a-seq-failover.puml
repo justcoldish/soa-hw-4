@@ -1,0 +1,43 @@
+@startuml a-seq-failover
+title Вариант A: failover push → SMS с переключением SMS-агрегатора
+autonumber
+participant "Deadline Scheduler" as sch
+participant "Orchestrator" as orch
+database "PostgreSQL" as pg
+queue "Kafka" as k
+participant "SMS Worker" as sw
+participant "SMS-агрегатор A" as a
+participant "SMS-агрегатор B" as b
+actor "Телефон клиента" as phone
+participant "Callback Gateway" as cb
+
+note over orch, pg : attempt#1 push = SENT в момент t0, ack не пришёл,\nnext_action_at = t0 + 15 с
+loop каждые 200 мс
+  sch -> pg : SELECT ... WHERE next_action_at <= now()\nFOR UPDATE SKIP LOCKED LIMIT 500
+end
+pg --> sch : уведомление N
+sch -> pg : next_action_at = now + 5 с (защита от повторной выдачи)
+sch -> k : delivery.events TIMEOUT(N)
+k -> orch : TIMEOUT
+orch -> pg : attempt#1 = FAILED(timeout), attempt#2 sms = CREATED,\nversion + 1, next_action_at = now + 3 с
+orch -> k : send.sms {attemptId}
+k -> sw : send.sms
+sw -> a : POST /sms, clientMsgId = attemptId
+a --> sw : 503 / таймаут 2 с
+note right of sw : circuit breaker A открывается\nпри 50% ошибок за 10 с
+sw -> b : POST /sms, clientMsgId = attemptId
+b --> sw : 200 accepted {providerMsgId}
+sw -> k : delivery.events SENT(provider = B)
+k -> orch : SENT
+orch -> pg : attempt#2 = SENT, next_action_at = now + 90 с
+b -> phone : SMS
+b -> cb : DLR DELIVERED {providerMsgId}
+cb -> k : delivery.events DELIVERED(sms)
+k -> orch : DELIVERED
+orch -> pg : notification = DELIVERED, next_action_at = NULL
+... через несколько секунд ...
+cb -> k : DELIVERED(push), запоздалый ack
+k -> orch : DELIVERED
+orch -> pg : уведомление уже финальное, фиксируем late_ack
+note over orch : метрика cross_channel_duplicate + 1,\nновых отправок нет
+@enduml

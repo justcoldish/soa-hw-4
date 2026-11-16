@@ -1,0 +1,33 @@
+@startuml b-seq-failover
+title Вариант B: failover push → SMS с переключением SMS-агрегатора
+autonumber
+participant "Temporal Server" as t
+participant "Delivery Workflow" as wf
+participant "SMS Activity Worker" as sw
+participant "SMS-агрегатор A" as a
+participant "SMS-агрегатор B" as b
+actor "Телефон клиента" as phone
+participant "Callback Gateway" as cb
+
+note over t, wf : SendPush выполнен, workflow ждёт сигнал,\nтаймер 15 с хранится в Temporal
+t -> wf : timer fired (сигнала нет)
+wf -> t : schedule SendSms(attemptId)\nretry: backoff 1 с, x2, максимум 5 попыток
+t -> sw : activity task (task queue sms)
+sw -> a : POST /sms, clientMsgId = attemptId
+a --> sw : 503 / таймаут 2 с
+note right of sw : circuit breaker A открыт,\nследующий вызов сразу идёт в B
+sw -> b : POST /sms, clientMsgId = attemptId
+b --> sw : 200 accepted {providerMsgId}
+sw --> t : activity completed(provider = B)
+t -> wf : workflow task
+wf -> t : await signal Delivered, timer 90 с
+b -> phone : SMS
+b -> cb : DLR DELIVERED {providerMsgId}
+cb -> t : SignalWorkflow(id, Delivered(sms))
+t -> wf : signal
+wf -> t : complete(DELIVERED)
+... через несколько секунд ...
+cb -> t : SignalWorkflow(id, Delivered(push)), запоздалый ack
+t --> cb : NotFound: workflow already completed
+note over cb : метрика cross_channel_duplicate + 1,\nновых отправок нет
+@enduml

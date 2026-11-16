@@ -1,0 +1,28 @@
+@startuml state-machine
+title Жизненный цикл критичного уведомления (общий для обоих вариантов)
+hide empty description
+
+[*] --> ACCEPTED : запрос принят, 202
+ACCEPTED --> DUPLICATE : Idempotency-Key уже встречался
+ACCEPTED --> SENDING : построен канальный план
+
+state SENDING {
+  state "попытка: CREATED" as CREATED
+  state "попытка: SENT" as SENT
+  [*] --> CREATED : следующий канал плана
+  CREATED --> CREATED : нет SENT за 3 с, повтор команды (до 3 раз)
+  CREATED --> SENT : провайдер принял
+  SENT --> FAILED : таймаут ack/DLR или DLR undelivered
+  CREATED --> FAILED : невалидный токен, провайдеры недоступны,\n3 повтора без SENT
+  FAILED --> CREATED : в плане есть ещё канал
+}
+
+SENDING --> DELIVERED : ack из приложения, DLR delivered, email принят MX
+SENDING --> RETRY_WAIT : каналы плана исчерпаны
+RETRY_WAIT --> SENDING : повтор плана через 5 мин, 30 мин, 2 ч
+RETRY_WAIT --> UNDELIVERED : истёк TTL 24 ч
+UNDELIVERED : алерт, задача поддержке,\nуведомление остаётся в ленте приложения
+DELIVERED --> [*]
+DUPLICATE --> [*]
+UNDELIVERED --> [*]
+@enduml

@@ -1,0 +1,41 @@
+@startuml a-seq-main
+title Вариант A: основной сценарий (push доставлен и подтверждён)
+autonumber
+participant "Сервис платежей" as src
+participant "Ingestion API" as api
+queue "Kafka" as k
+participant "Orchestrator" as orch
+database "PostgreSQL" as pg
+database "Redis" as r
+participant "In-app Inbox" as inbox
+participant "Push Worker" as pw
+participant "APNs / FCM" as apns
+actor "Приложение клиента" as app
+participant "Callback Gateway" as cb
+
+src -> api : SendCritical(userId, template, data)\nIdempotency-Key = txId:DEBIT
+api -> k : critical.requests (key = notificationId), acks=all
+k --> api : ack
+api --> src : 202 Accepted {notificationId}
+k -> orch : request
+orch -> pg : INSERT dedup ON CONFLICT DO NOTHING
+orch -> r : настройки и контакты клиента
+r --> orch : основной канал push, токен активен
+orch -> pg : notification = SENDING, attempt#1 push = CREATED,\nnext_action_at = now + 3 с
+orch -> inbox : запись в ленту приложения
+orch -> k : send.push {attemptId}
+k -> pw : send.push
+pw -> r : SET attempt:{attemptId} NX EX 2s
+note right of pw : захват короче дедлайна 3 с: если воркер упал,\nповтор команды не заблокирован
+pw -> apns : push, collapse-id = notificationId
+apns --> pw : 200 OK
+pw -> k : delivery.events SENT
+k -> orch : SENT
+orch -> pg : attempt#1 = SENT, next_action_at = now + 15 с
+apns -> app : push
+app -> cb : POST /v1/acks {notificationId, deviceId}
+cb -> k : delivery.events DELIVERED(push)
+k -> orch : DELIVERED
+orch -> pg : notification = DELIVERED, next_action_at = NULL
+note over orch : метрики: время до ack, канал push,\nстоимость 0, трейс завершён
+@enduml
